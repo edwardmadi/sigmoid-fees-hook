@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {FunctionsConsumer} from "./FunctionsConsumer.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
@@ -12,6 +13,7 @@ import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {ABDKMath64x64} from "abdk-libraries-solidity/ABDKMath64x64.sol";
+import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 
 // POC FOR WETH/USDC POOL
@@ -23,43 +25,58 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapD
 // NOTE: EFFICIENT ARBITRAGE OCCURS AT TOP OF THE BLOCK
 
 contract DynamicSigmoidFeesHook is BaseHook {
+    ///////////////////
+    // Types
+    ///////////////////
     using LPFeeLibrary for uint24;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
     using CurrencyLibrary for Currency;
+    using OracleLib for AggregatorV3Interface;
+    using OracleLib for FunctionsConsumer;
 
+    ///////////////////
+    // Errors
+    ///////////////////
+    error DynamicSigmoidFeesHook__MustUseDynamicFee();
+    error DynamicSigmoidFeesHook__MustOnlyBeUsedForUSDCToWETHPool();
+    error DynamicSigmoidFeesHook__DivisionByZero();
+    error DynamicSigmoidFeesHook__NegativeFee();
+
+    ///////////////////
+    // State Variables
+    ///////////////////
     // address constant WETH_ADDRESS_MAINNET = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     // address constant USDC_ADDRESS_MAINNET = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    // address ETH_USD_PRICE_FEED = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
+    //uint24 public constant BASE_FEE_HBPS = 500; // The default base fees in hundredths of a bip - TODO: Define at constructor
 
-    // int128 Q96 = ABDKMath64x64.fromUInt(2 ** 96); // Q96 as 64.64 fixed-point
-    int128 Q96 = 2;
-    // uint8 constant PRICE_PRECISION = 3;
+    FunctionsConsumer private baseTokenFunctionsConsumer;
+    AggregatorV3Interface private baseTokenPriceFeed;
 
-    uint24 public constant BASE_FEE_HBPS = 500; // The default base fees in hundredths of a bip - TODO: Define at constructor
+    uint24 public baseFeeHbps;
 
-    uint8 constant BASE_TOKEN_DECIMALS = 18; // WETH
-    uint8 constant QUOTE_TOKEN_DECIMALS = 6; // USDC
+    uint8 private constant BASE_TOKEN_DECIMALS = 18; // WETH
+    uint8 private constant QUOTE_TOKEN_DECIMALS = 6; // USDC
 
-    int128 ONE_PERCENT = ABDKMath64x64.fromInt(1); // Represent 1 in 64.64 format
+    int128 private ONE_PERCENT = ABDKMath64x64.fromInt(1); // Represent 1 in 64.64 format
 
     // Sigmoid S-Curve Parameters
-    int128 C0 = 0; // Represent 0 in 64.64 fixed-point format
-    int128 C1 = ABDKMath64x64.fromInt(1); // Represent 1 in 64.64 format
-    int128 C2 = ABDKMath64x64.fromInt(600); // Represent 600 in 64.64 format
-    int128 C3;
+    int128 private C0 = 0; // Represent 0 in 64.64 fixed-point format
+    int128 private C1 = ABDKMath64x64.fromInt(1); // Represent 1 in 64.64 format
+    int128 private C2 = ABDKMath64x64.fromInt(600); // Represent 600 in 64.64 format
+    int128 private C3;
 
-    uint256 lastBlockNumber;
-    int128 poolOraclePriceDelta;
-    uint24 blockSwapFee;
-    uint24 blockSwapFeeDeltaPerc;
+    uint256 public lastBlockNumber;
+    int128 public poolOraclePriceDelta;
+    uint24 public blockSwapFee;
+    uint24 public blockSwapFeeDeltaPerc;
 
     uint24 public lastSwapFee; // Testing purposes only
 
-    error MustUseDynamicFee();
-    error MustOnlyBeUsedForUSDCToWETHPool();
-    error DivisionByZero();
-    error NegativeFee();
-
+    ///////////////////
+    // Events
+    ///////////////////
     event SwapFeeUpdated(uint24 newSwapFee);
 
     event SwapFeeCalculated(
@@ -73,9 +90,20 @@ contract DynamicSigmoidFeesHook is BaseHook {
     event PriceFromOracle(uint256 price); // Testing purposes only
     event PriceFromPool(uint64 price); // Testing purposes only
 
+    ///////////////////
+    // Functions
+    ///////////////////
     // Initialize BaseHook parent contract in the constructor
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
+    constructor(
+        IPoolManager _poolManager,
+        address _baseTokenPriceFeed,
+        address _baseTokenFunctionsConsumer,
+        uint24 _baseFeeHbps
+    ) BaseHook(_poolManager) {
         C3 = ABDKMath64x64.divu(1, 100); // Represent 0.01 in 64.64 format
+        baseTokenPriceFeed = AggregatorV3Interface(_baseTokenPriceFeed);
+        baseTokenFunctionsConsumer = FunctionsConsumer(_baseTokenFunctionsConsumer);
+        baseFeeHbps = _baseFeeHbps;
     }
 
     // Required override function for BaseHook to let the PoolManager know which hooks are implemented
@@ -103,7 +131,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
         override
         returns (bytes4)
     {
-        if (!key.fee.isDynamicFee()) revert MustUseDynamicFee();
+        if (!key.fee.isDynamicFee()) revert DynamicSigmoidFeesHook__MustUseDynamicFee();
         // if (
         //     Currency.unwrap(key.currency0) != WETH_ADDRESS_MAINNET
         //         || Currency.unwrap(key.currency1) != USDC_ADDRESS_MAINNET
@@ -144,6 +172,10 @@ contract DynamicSigmoidFeesHook is BaseHook {
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
+    //////////////////////////////
+    // Private & Internal View & Pure Functions
+    //////////////////////////////
+
     /// @notice Computes the price delta percentage between pool price and CEX price using 64.64 fixed-point arithmetic
     /// @return The absolute price delta percentage in 64.64 fixed-point format
     function computePoolVsCexPriceDeltaPercentage(uint160 sqrtPriceX96) internal returns (int128) {
@@ -168,14 +200,35 @@ contract DynamicSigmoidFeesHook is BaseHook {
         return priceDeltaPercentage; // Return in 64.64 format
     }
 
+    function updatePoolFee(PoolKey calldata key, uint24 newFee) internal {
+        if (baseTokenFunctionsConsumer.checkCustomOracleLatestRoundData()) {
+            poolManager.updateDynamicLPFee(key, newFee);
+        } else if (baseTokenPriceFeed.checkChainlinkLatestRoundData()) {
+            poolManager.updateDynamicLPFee(key, newFee);
+        } else {
+            poolManager.updateDynamicLPFee(key, baseFeeHbps);
+        }
+    }
+
     /// @notice Mock function to get the price from an oracle in 64.64 fixed-point format
     /// Replace this function with your actual oracle call.
     function getPriceFromOracle64x64() internal returns (int128) {
-        uint256 cexPrice = 2374 * 10 ** 12;
-        // uint256 cexPrice = 2374 * 10 ** (PRICE_PRECISION); // Example price (2372 in 1e8 format)
+        uint256 latestPrice;
+        uint8 priceDecimals;
+        if (baseTokenFunctionsConsumer.checkCustomOracleLatestRoundData()) {
+            latestPrice = baseTokenFunctionsConsumer.getCustomOracleLatestPrice();
+            priceDecimals = OracleLib.getCustomOracleDecimals();
+        } else {
+            (, int256 answer,,,) = baseTokenPriceFeed.latestRoundData();
+            latestPrice = uint256(answer);
+            priceDecimals = baseTokenPriceFeed.decimals();
+        }
+        // (, int256 answer,,,) = baseTokenPriceFeed.latestRoundData();
+        // uint8 priceDecimals = baseTokenPriceFeed.decimals();
+        uint256 decimalAdjustment = 10 ** (BASE_TOKEN_DECIMALS - QUOTE_TOKEN_DECIMALS - priceDecimals);
+        uint256 cexPrice = latestPrice * decimalAdjustment;
         emit PriceFromOracle(cexPrice);
         return ABDKMath64x64.fromUInt(cexPrice);
-        // return ABDKMath64x64.divu(cexPrice, 1e12); // Convert to 64.64 fixed-point format
     }
 
     /// @notice Converts sqrtPriceX96 to price considering token decimals with 18 decimals precision
@@ -188,7 +241,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
 
         // Calculate the price in 64.64 fixed-point format as (1 / (sqrtPrice^2)) -> Assuming token0 is quote token and token1 is base token (USDC/WETH)
         int128 sqrtPriceSquared = ABDKMath64x64.mul(sqrtPrice, sqrtPrice);
-        if (sqrtPriceSquared == 0) revert DivisionByZero();
+        if (sqrtPriceSquared == 0) revert DynamicSigmoidFeesHook__DivisionByZero();
         int128 price = ABDKMath64x64.div(ABDKMath64x64.fromUInt(1), sqrtPriceSquared);
         // return price;
 
@@ -222,7 +275,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
     function calculateFee(IPoolManager.SwapParams calldata params) internal returns (uint24) {
         int128 dynamicFee;
         // int128 base_swap_fee = ABDKMath64x64.divu(BASE_FEE_HBPS, 10000); // 5 bps = 0.05%  (64.64 format)
-        int128 base_swap_fee = ABDKMath64x64.fromUInt(BASE_FEE_HBPS);
+        int128 base_swap_fee = ABDKMath64x64.fromUInt(baseFeeHbps);
         int128 _absPoolOraclePriceDelta = ABDKMath64x64.abs(poolOraclePriceDelta);
         int128 _blockSwapFeeDeltaPerc = calculateAbsSigFeePercentage(_absPoolOraclePriceDelta);
         int128 _one_perc = ONE_PERCENT;
@@ -248,7 +301,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
             dynamicFee = base_swap_fee; // Default to base swap fee if price delta is zero
         }
 
-        if (dynamicFee < 0) revert NegativeFee();
+        if (dynamicFee < 0) revert DynamicSigmoidFeesHook__NegativeFee();
 
         uint24 newDynamicFee = uint24(ABDKMath64x64.toUInt(dynamicFee));
 

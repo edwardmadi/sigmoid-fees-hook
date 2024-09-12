@@ -8,6 +8,7 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolManager} from "v4-core/PoolManager.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {MockV3Aggregator} from "./mocks/MockV3Aggregator.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -15,12 +16,14 @@ import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {DynamicSigmoidFeesHook} from "../src/DynamicSigmoidFeesHook.sol";
+import {HelperConfig} from "../script/HelperConfig.s.sol";
 
 contract TestDynamicSigmoidFeesHook is Test, Deployers {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
 
     DynamicSigmoidFeesHook hook;
+    HelperConfig public helperConfig;
 
     function setUp() public {
         // Deploy v4-core
@@ -29,10 +32,20 @@ contract TestDynamicSigmoidFeesHook is Test, Deployers {
         // Deploy, mint tokens, and approve all periphery contracts for two tokens
         deployMintAndApprove2Currencies();
 
+        helperConfig = new HelperConfig();
+
         // Deploy our hook with the proper flags
         address hookAddress = address(uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG));
 
-        deployCodeTo("DynamicSigmoidFeesHook", abi.encode(manager), hookAddress);
+        (address ethUsdPriceFeed, address weth,,, address functionsConsumer, uint256 deployerKey) =
+            helperConfig.activeNetworkConfig();
+        // console.log("ETH/USD price feed:", ethUsdPriceFeed);
+        // console.log("DEFAULT_BASE_FEE_HBPS:", helperConfig.DEFAULT_BASE_FEE_HBPS());
+        deployCodeTo(
+            "DynamicSigmoidFeesHook",
+            abi.encode(manager, ethUsdPriceFeed, functionsConsumer, helperConfig.DEFAULT_BASE_FEE_HBPS()),
+            hookAddress
+        );
         hook = DynamicSigmoidFeesHook(hookAddress);
 
         // Initialize a pool
@@ -57,10 +70,6 @@ contract TestDynamicSigmoidFeesHook is Test, Deployers {
             ZERO_BYTES
         );
     }
-
-    // TODO:
-    // 1 - Finish test - OK
-    // 2 - Add assertion for fee really paid in the swap
 
     function test_feeUpdatesWithPriceChangeInConsecutiveBlocks() public {
         // Token0 = WETH
@@ -94,7 +103,7 @@ contract TestDynamicSigmoidFeesHook is Test, Deployers {
         assertEq(initialFeeValue, 0);
         console.log("Fee value after 1st swap:", newFeeValue);
 
-        assertEq(newFeeValue, hook.BASE_FEE_HBPS());
+        assertEq(newFeeValue, hook.baseFeeHbps());
         assertGt(balanceOfToken1After, balanceOfToken1Before);
 
         // ----------------------------------------------------------------------
