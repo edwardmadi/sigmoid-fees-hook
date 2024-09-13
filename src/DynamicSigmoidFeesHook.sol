@@ -39,7 +39,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
     // Errors
     ///////////////////
     error DynamicSigmoidFeesHook__MustUseDynamicFee();
-    error DynamicSigmoidFeesHook__MustOnlyBeUsedForUSDCToWETHPool();
+    error DynamicSigmoidFeesHook__MustOnlyBeUsedForUSDCToWETHPool(); // TODO: Comment or Remove
     error DynamicSigmoidFeesHook__DivisionByZero();
     error DynamicSigmoidFeesHook__NegativeFee();
 
@@ -56,8 +56,8 @@ contract DynamicSigmoidFeesHook is BaseHook {
 
     uint24 public baseFeeHbps;
 
-    uint8 private constant BASE_TOKEN_DECIMALS = 18; // WETH
-    uint8 private constant QUOTE_TOKEN_DECIMALS = 6; // USDC
+    uint8 public constant BASE_TOKEN_DECIMALS = 18; // WETH
+    uint8 public constant QUOTE_TOKEN_DECIMALS = 6; // USDC
 
     int128 private ONE_PERCENT = ABDKMath64x64.fromInt(1); // Represent 1 in 64.64 format
 
@@ -72,7 +72,9 @@ contract DynamicSigmoidFeesHook is BaseHook {
     uint24 public blockSwapFee;
     uint24 public blockSwapFeeDeltaPerc;
 
-    uint24 public lastSwapFee; // Testing purposes only
+    // Testing purposes only:
+    uint24 public lastSwapFee;
+    uint256 public lastPriceFromOracle;
 
     ///////////////////
     // Events
@@ -132,12 +134,6 @@ contract DynamicSigmoidFeesHook is BaseHook {
         returns (bytes4)
     {
         if (!key.fee.isDynamicFee()) revert DynamicSigmoidFeesHook__MustUseDynamicFee();
-        // if (
-        //     Currency.unwrap(key.currency0) != WETH_ADDRESS_MAINNET
-        //         || Currency.unwrap(key.currency1) != USDC_ADDRESS_MAINNET
-        // ) {
-        //     revert MustOnlyBeUsedForUSDCToWETHPool();
-        // }
         lastBlockNumber = block.number;
         return this.beforeInitialize.selector;
     }
@@ -148,9 +144,10 @@ contract DynamicSigmoidFeesHook is BaseHook {
         onlyByPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        //takeCommission(key, swapParams);
+
         uint160 _sqrtPriceX96;
         uint24 _swapFeePerc;
-
         (_sqrtPriceX96,,,) = poolManager.getSlot0(key.toId());
 
         if (block.number > lastBlockNumber) {
@@ -165,8 +162,8 @@ contract DynamicSigmoidFeesHook is BaseHook {
         }
 
         // Update the dynamic LP fee again with the newly calculated value
-        poolManager.updateDynamicLPFee(key, _swapFeePerc);
-        lastSwapFee = _swapFeePerc;
+        // poolManager.updateDynamicLPFee(key, _swapFeePerc);
+        updatePoolFee(key, _swapFeePerc);
         emit SwapFeeUpdated(_swapFeePerc);
 
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
@@ -185,6 +182,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
 
         // Get the CEX price in 64.64 fixed-point format
         int128 cexPrice = getPriceFromOracle64x64(); // Assumes the oracle returns a 64.64 format price
+        lastPriceFromOracle = uint256(ABDKMath64x64.toUInt(cexPrice));
 
         // Calculate the absolute price delta in 64.64 fixed-point format
         int128 priceDelta;
@@ -201,13 +199,17 @@ contract DynamicSigmoidFeesHook is BaseHook {
     }
 
     function updatePoolFee(PoolKey calldata key, uint24 newFee) internal {
-        if (baseTokenFunctionsConsumer.checkCustomOracleLatestRoundData()) {
-            poolManager.updateDynamicLPFee(key, newFee);
-        } else if (baseTokenPriceFeed.checkChainlinkLatestRoundData()) {
-            poolManager.updateDynamicLPFee(key, newFee);
+        uint24 _appliedFee;
+        if (
+            baseTokenFunctionsConsumer.checkCustomOracleLatestRoundData()
+                || baseTokenPriceFeed.checkChainlinkLatestRoundData()
+        ) {
+            _appliedFee = newFee;
         } else {
-            poolManager.updateDynamicLPFee(key, baseFeeHbps);
+            _appliedFee = baseFeeHbps;
         }
+        poolManager.updateDynamicLPFee(key, _appliedFee);
+        lastSwapFee = _appliedFee;
     }
 
     /// @notice Mock function to get the price from an oracle in 64.64 fixed-point format
@@ -314,4 +316,19 @@ contract DynamicSigmoidFeesHook is BaseHook {
         int128 _oraclePrice64x64 = getPriceFromOracle64x64();
         return ABDKMath64x64.toUInt(_oraclePrice64x64);
     }
+
+    /// POC taking commissions to cover Chainlink costs
+    // function takeCommission(PoolKey calldata key, IPoolManager.SwapParams calldata swapParams) internal {
+    //     uint256 tokenAmount =
+    //         swapParams.amountSpecified < 0 ? uint256(-swapParams.amountSpecified) : uint256(swapParams.amountSpecified);
+
+    //     uint256 commissionAmt = Math.mulDiv(tokenAmount, HOOK_COMMISSION, 10000);
+
+    //     // determine inbound token based on 0->1 or 1->0 swap
+    //     Currency inbound = swapParams.zeroForOne ? key.currency0 : key.currency1;
+
+    //     // take the inbound token from the PoolManager, debt is paid by the swapper via the swap router
+    //     // (inbound token is added to hook's reserves)
+    //     poolManager.take(inbound, address(this), commissionAmt);
+    // }
 }

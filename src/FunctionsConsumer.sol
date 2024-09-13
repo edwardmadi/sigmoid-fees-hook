@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Sepolia address: 0x2bf1e218991fdb116f4eb7a2acd8ee067a5669de
+// Sepolia address: 0xddc2e9aae870617c91fa417809b14cfde4f76181
+// Sepolia automation upkeep address: 0xddc2e9aae870617c91fa417809b14cfde4f76181 
 
 pragma solidity ^0.8.19;
 
@@ -72,7 +73,7 @@ contract FunctionsConsumer is FunctionsClient, ConfirmedOwner {
     function sendRequest(
         uint64 subscriptionId,
         string[] calldata args
-    ) external onlyOwner returns (bytes32 requestId) {
+    ) external returns (bytes32 requestId) {
         FunctionsRequest.Request memory req;
         req.initializeRequestForInlineJavaScript(source); // Initialize the request with JS code
         if (args.length > 0) req.setArgs(args); // Set the arguments for the request
