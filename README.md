@@ -36,7 +36,7 @@ My workaround for this was the implementation of a custom oracle based on the pr
 **Custom Low Latency Oracle Sepolia Addresses:**
 
 - **Chainlink Functions Consumer**: `0xddc2e9aae870617c91fa417809b14cfde4f76181`
-- **Chainlink Automation Upkeep**: `0xddc2e9aae870617c91fa417809b14cfde4f76181`
+- **Chainlink Automation Upkeep**: `0xC25f1055f9F8281cf60b1CEC7faD803d5F96e755`
 
 This low latency oracle mechanism was successfully tested on the Sepolia testnet, as can be seen in the executed transactions. After testing, the Upkeep contract was paused to stop the testnet LINK consumption.
 
