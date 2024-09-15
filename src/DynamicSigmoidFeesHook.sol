@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+/**
+ * @title Dynamic Sigmoid Fee Model Proof of Concept (PoC)
+ * @dev This contract was developed as part of a hackathon to demonstrate a dynamic sigmoid fee model.
+ *      It currently only supports the USD/WETH pool with a 0.05% fee tier due to hardcoded values
+ *      such as token decimals and parameters fine-tuned specifically for this pool.
+ *      Note: This is a PoC and not production-ready; it lacks flexibility and generalization for other pools
+ *      or fee tiers. Future iterations would need to address these limitations for broader applicability.
+ */
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {FunctionsConsumer} from "./FunctionsConsumer.sol";
@@ -15,14 +23,6 @@ import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {ABDKMath64x64} from "abdk-libraries-solidity/ABDKMath64x64.sol";
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
-
-// POC FOR WETH/USDC POOL
-//
-// SWAP FEE INCREASE AT TOP OF THE BLOCK IF SWAP IS IN THE SAME DIRECTION OF LAST PRICE CHANGE OR DECREASE OTHERWISE
-// (DEFINED BY THE TICK BEFORE THE SWAP AND THE PREVIOUS ONE)
-//
-// SWAP FEE = TOP OF THE BLOCK FEE FOR REMAINING BLOCKS
-// NOTE: EFFICIENT ARBITRAGE OCCURS AT TOP OF THE BLOCK
 
 contract DynamicSigmoidFeesHook is BaseHook {
     ///////////////////
@@ -46,10 +46,6 @@ contract DynamicSigmoidFeesHook is BaseHook {
     ///////////////////
     // State Variables
     ///////////////////
-    // address constant WETH_ADDRESS_MAINNET = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    // address constant USDC_ADDRESS_MAINNET = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    // address ETH_USD_PRICE_FEED = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
-    //uint24 public constant BASE_FEE_HBPS = 500; // The default base fees in hundredths of a bip - TODO: Define at constructor
 
     FunctionsConsumer private baseTokenFunctionsConsumer;
     AggregatorV3Interface private baseTokenPriceFeed;
@@ -198,6 +194,9 @@ contract DynamicSigmoidFeesHook is BaseHook {
         return priceDeltaPercentage; // Return in 64.64 format
     }
 
+    /// @notice Updates the pool fee based on the price validity:
+    /// - Sets the new fee if calculated from a price updated before the timeout.
+    /// - Sets the base fee if the price used is no longer valid.
     function updatePoolFee(PoolKey calldata key, uint24 newFee) internal {
         uint24 _appliedFee;
         if (
@@ -212,8 +211,9 @@ contract DynamicSigmoidFeesHook is BaseHook {
         lastSwapFee = _appliedFee;
     }
 
-    /// @notice Mock function to get the price from an oracle in 64.64 fixed-point format
-    /// Replace this function with your actual oracle call.
+    /// @notice Retrieves the latest price in 64x64 fixed-point format:
+    /// - Uses the custom oracle price if it is updated.
+    /// - Falls back to the latest price from the Chainlink ETH/USD price feed if the custom oracle is not updated.
     function getPriceFromOracle64x64() internal returns (int128) {
         uint256 latestPrice;
         uint8 priceDecimals;
@@ -225,8 +225,6 @@ contract DynamicSigmoidFeesHook is BaseHook {
             latestPrice = uint256(answer);
             priceDecimals = baseTokenPriceFeed.decimals();
         }
-        // (, int256 answer,,,) = baseTokenPriceFeed.latestRoundData();
-        // uint8 priceDecimals = baseTokenPriceFeed.decimals();
         uint256 decimalAdjustment = 10 ** (BASE_TOKEN_DECIMALS - QUOTE_TOKEN_DECIMALS - priceDecimals);
         uint256 cexPrice = latestPrice * decimalAdjustment;
         emit PriceFromOracle(cexPrice);
@@ -262,11 +260,14 @@ contract DynamicSigmoidFeesHook is BaseHook {
     /// @param priceDelta The price delta as a 64.64 fixed-point number
     /// @return fee The calculated fee percentage as a 64.64 fixed-point number
     function calculateAbsSigFeePercentage(int128 priceDelta) internal view returns (int128) {
-        // Calculate exponent: -C2 * (priceDelta - C3)
-        int128 exponent = ABDKMath64x64.neg(ABDKMath64x64.mul(C2, ABDKMath64x64.sub(priceDelta, C3)));
+        // Calculate exponent: C2 * (priceDelta - C3)
+        int128 exponent = ABDKMath64x64.mul(C2, ABDKMath64x64.sub(priceDelta, C3));
 
-        // Calculate sigmoid using exp function from ABDKMath64x64
-        int128 sigmoid = ABDKMath64x64.div(C1, ABDKMath64x64.add(C1, ABDKMath64x64.exp(exponent)));
+        // Calculate sigmoid using the adjusted form
+        int128 sigmoid = ABDKMath64x64.div(
+            ABDKMath64x64.fromInt(1),
+            ABDKMath64x64.add(ABDKMath64x64.fromInt(1), ABDKMath64x64.exp(ABDKMath64x64.neg(exponent)))
+        );
 
         // Calculate fee: C0 + C1 * sigmoid
         int128 fee = ABDKMath64x64.add(C0, ABDKMath64x64.mul(C1, sigmoid));
@@ -276,7 +277,6 @@ contract DynamicSigmoidFeesHook is BaseHook {
 
     function calculateFee(IPoolManager.SwapParams calldata params) internal returns (uint24) {
         int128 dynamicFee;
-        // int128 base_swap_fee = ABDKMath64x64.divu(BASE_FEE_HBPS, 10000); // 5 bps = 0.05%  (64.64 format)
         int128 base_swap_fee = ABDKMath64x64.fromUInt(baseFeeHbps);
         int128 _absPoolOraclePriceDelta = ABDKMath64x64.abs(poolOraclePriceDelta);
         int128 _blockSwapFeeDeltaPerc = calculateAbsSigFeePercentage(_absPoolOraclePriceDelta);
@@ -322,7 +322,7 @@ contract DynamicSigmoidFeesHook is BaseHook {
     //     uint256 tokenAmount =
     //         swapParams.amountSpecified < 0 ? uint256(-swapParams.amountSpecified) : uint256(swapParams.amountSpecified);
 
-    //     uint256 commissionAmt = Math.mulDiv(tokenAmount, HOOK_COMMISSION, 10000);
+    //     uint256 commissionAmt = Math.mulDiv(tokenAmount, HOOK_COMMISSION, 10000); // HOOK COMISSION SHOULD BE DEFINED
 
     //     // determine inbound token based on 0->1 or 1->0 swap
     //     Currency inbound = swapParams.zeroForOne ? key.currency0 : key.currency1;

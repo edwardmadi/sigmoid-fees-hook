@@ -1,29 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-// TODO:
-// 1 - Create MockFunctionsCosumemer + adapt oracle lib to use it - OK
-// 2 - Fine tune the timeout - OK
-// 3 - Set up automation for chainlink function as oracle - OK
-// 4 - Add tests for price correctness/ failsafe mechanisms - OK
-// 5 - Deploy univ4 (?) + hooks to sepolia and test there
-// 6 - Create tests for testnet/testnetfork(?)
-// 7 - Clean up code + add comments
-// 8 - Add POC for protocol fees
-// ---------- Sunday ----------
-// 9 - Gather some analytics cool charts and prepare presentation
-// 10 - Record presentation
-
 import {FunctionsConsumer} from "../FunctionsConsumer.sol";
 import {AggregatorV3Interface} from "chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-
-/*
- * @title OracleLib
- * @notice This library is used to check the Chainlink Oracle for stale data.
- * If a price is stale, functions will revert, and render the DSCEngine unusable - this is by design.
- *
- * So if the Chainlink network explodes and you have a lot of money locked in the protocol... too bad.
- */
 
 library OracleLib {
     error OracleLib__InvalidCharInString();

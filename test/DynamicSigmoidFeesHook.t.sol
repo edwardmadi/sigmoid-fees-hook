@@ -41,8 +41,6 @@ contract TestDynamicSigmoidFeesHook is Test, Deployers {
         address hookAddress = address(uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG));
 
         (address _ethUsdPriceFeed,,,, address functionsConsumer,) = helperConfig.activeNetworkConfig();
-        // console.log("ETH/USD price feed:", ethUsdPriceFeed);
-        // console.log("DEFAULT_BASE_FEE_HBPS:", helperConfig.DEFAULT_BASE_FEE_HBPS());
         ethUsdPriceFeed = _ethUsdPriceFeed;
         deployCodeTo(
             "DynamicSigmoidFeesHook",
