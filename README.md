@@ -44,6 +44,9 @@ This oracle mechanism is a PoC for demonstrating the Sigmoid Directional Fees me
 
 Even being a PoC, I've tried to make it as reliable as possible within the least development time. Thus, I'm using the regular Chainlink ETH/USD price feed as a fallback in case the custom oracle price gets stale. In the worst-case scenario, if the Chainlink price feed updated time also exceeds the defined timeout, the swap fee retrieved is simply the base fee.
 
+### Data Flow Diagram
+![Data Flow Diagram](data_flow.png)
+
 ### Implementation Notes
 
 As this curve was implemented as a smart contract and exponential calculations are gas-expensive, the fee value is only updated in the first swap of each block and remains the same for subsequent swaps within the same block. This implementation decision has a low impact on reducing arbitrage since effective arbitrage only happens at the top of the block due to high MEV searcher competition.
